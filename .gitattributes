@@ -1,0 +1,7 @@
+# Normalise line endings so the repository is identical on every platform.
+* text=auto eol=lf
+
+# Windows-only binaries stay untouched.
+*.exe binary
+*.obj binary
+*.pdb binary

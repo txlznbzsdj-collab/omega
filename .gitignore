@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Benchmark binaries built outside cargo
+bench/*.exe
+bench/*.obj
+
+# Machine-local cargo override (points at a specific registry and disables the
+# proxy). Kept out of the repository so it cannot override a contributor's own
+# cargo configuration.
+/.cargo/config.toml
