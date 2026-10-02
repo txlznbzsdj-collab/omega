@@ -40,13 +40,13 @@ path = "bench/compare.rs"
 [[bin]]
 name = "omega-gui"
 path = "src/bin/omega-gui.rs"
-# Proves the evaluation logic the GUI performs between its Win32 calls, so the
-# wiring can be checked without an interactive desktop.
-[[bin]]
-name = "gui-path-check"
-path = "bench/gui-path-check.rs"
 # Measures the real text capacity of a Win32 edit control, so result display is
 # sized against evidence rather than a guess.
 [[bin]]
 name = "edit-limit-probe"
 path = "bench/edit-limit-probe.rs"
+# Enumerates a running window's controls, so the keypad and menu can be
+# confirmed without being able to see or click them.
+[[bin]]
+name = "gui-inspect"
+path = "bench/gui-inspect.rs"

@@ -13,7 +13,8 @@
 //! worker thread, would add synchronization for a case the engine already keeps
 //! fast.
 
-use crate::format::{self, Style};
+use crate::format::{self, Grouping, Style};
+use crate::gui::{edit, keypad};
 use crate::Engine;
 use std::ptr;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -22,17 +23,19 @@ use windows_sys::Win32::Graphics::Gdi::{
     DEFAULT_CHARSET, FF_MODERN, FIXED_PITCH, HFONT, OUT_DEFAULT_PRECIS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Controls::{EM_SCROLLCARET, EM_SETSEL};
+use windows_sys::Win32::UI::Controls::{EM_GETSEL, EM_SCROLLCARET, EM_SETSEL};
 // `SetFocus` lives under Input::KeyboardAndMouse and `UpdateWindow` under
 // Graphics::Gdi in windows-sys, not with the rest of the window messages.
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_RETURN};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, LoadCursorW, MessageBoxW,
-    MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowTextW,
-    ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE,
-    ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GWLP_USERDATA, GWLP_WNDPROC,
-    IDC_ARROW, MB_ICONERROR, MB_OK, MSG, SW_SHOW, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
+    AppendMenuW, CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyMenu, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, GetParent,
+    GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, LoadCursorW, MessageBoxW, MoveWindow,
+    PostQuitMessage, RegisterClassW, SendMessageW, SetMenu, SetWindowLongPtrW, SetWindowTextW,
+    ShowWindow, TranslateMessage, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+    CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY,
+    GWLP_USERDATA, GWLP_WNDPROC, HMENU, IDC_ARROW, MB_ICONERROR, MB_OK, MF_BYCOMMAND, MF_CHECKED,
+    MF_POPUP, MF_STRING, MF_UNCHECKED, MSG, SW_SHOW, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
     WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_NCCREATE, WM_SETFONT, WM_SIZE, WNDCLASSW, WNDPROC,
     WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
@@ -45,11 +48,29 @@ const ID_INPUT: i32 = 1;
 /// be told apart; nothing is dispatched on it.
 const ID_OUTPUT: i32 = 2;
 
+/// The most keys the pad may ever hold, used to size the command-id range. The
+/// keypad module owns the actual list; this only has to be generous enough that
+/// the range check stays valid.
+const MAX_KEYS: usize = 64;
+
+/// Command ids for the menu. Grouped away from the keypad range so a misread
+/// command cannot be mistaken for a key press.
+const ID_MENU_GROUP_NONE: i32 = 900;
+const ID_MENU_GROUP_UNDERSCORE: i32 = 901;
+const ID_MENU_GROUP_COMMA: i32 = 902;
+const ID_MENU_GROUP_SPACE: i32 = 903;
+
 /// Gaps and minimum sizes, in pixels, for the manual layout.
 const MARGIN: i32 = 8;
 const GAP: i32 = 6;
 const MIN_INPUT_HEIGHT: i32 = 22;
 const MIN_OUTPUT_HEIGHT: i32 = 80;
+
+/// The keypad's share of the window width, bounded so it neither vanishes on a
+/// narrow window nor crowds out the result on a wide one.
+const KEYPAD_WIDTH_DIVISOR: i32 = 3;
+const MIN_KEYPAD_WIDTH: i32 = 180;
+const MAX_KEYPAD_WIDTH: i32 = 380;
 
 /// A font that is installed on essentially every Windows system, used when
 /// Consolas is not available. Both are fixed pitch, which results need: a
@@ -165,6 +186,14 @@ struct Window {
     /// The input control's original window procedure, restored by the subclass
     /// for every message it does not handle itself.
     input_proc: isize,
+    /// Keypad buttons in grid order, so a command id can be turned back into a
+    /// key without searching.
+    buttons: Vec<HWND>,
+    /// Menu handle, kept so the checked item can be updated when a setting
+    /// changes.
+    menu: HMENU,
+    /// How results are arranged: significant digits and digit grouping.
+    style: Style,
     engine: Engine,
     /// The rendered result, kept so `WM_GETFONT`/rescaling would not have to
     /// recompute anything, and so the text handed to `SetWindowTextW` outlives
@@ -257,6 +286,9 @@ unsafe extern "system" fn wndproc(
                 font: ptr::null_mut(),
                 font_owned: false,
                 input_proc: 0,
+                buttons: Vec::new(),
+                menu: ptr::null_mut(),
+                style: Style::default(),
                 engine: Engine::new(),
                 last_output: String::new(),
             });
@@ -271,6 +303,13 @@ unsafe extern "system" fn wndproc(
             if state.is_null() || create_controls(window, &mut *state).is_err() {
                 -1
             } else {
+                // The menu is attached before the first layout so the client
+                // area already excludes it when the controls are measured.
+                match create_menu(window) {
+                    Ok(menu) => (*state).menu = menu,
+                    Err(()) => return -1,
+                }
+                set_grouping(&mut *state, ID_MENU_GROUP_NONE);
                 layout(&*state);
                 focus_input(&*state);
                 1
@@ -289,16 +328,21 @@ unsafe extern "system" fn wndproc(
         WM_COMMAND => {
             let id = (wparam & 0xffff) as i32;
             let notification = ((wparam >> 16) & 0xffff) as u32;
-            // An edit control reports progress through `EN_CHANGE`, not through
-            // notification code 0. Live evaluation on every change means the
-            // answer is already on screen when Enter is pressed, which also
-            // covers the case where the window has no default button to give
-            // the key to.
-            if id == ID_INPUT && notification == EN_CHANGE {
-                let state = state_of(window);
-                if !state.is_null() {
-                    evaluate(&mut *state);
-                }
+            let state = state_of(window);
+            if state.is_null() {
+                return 0;
+            }
+            // A keypad button reports `BN_CLICKED`, which is 0, so unlike the
+            // edit control it is identified by its id alone.
+            if (keypad::ID_KEY_FIRST..keypad::ID_KEY_FIRST + MAX_KEYS as i32).contains(&id) {
+                press(&mut *state, (id - keypad::ID_KEY_FIRST) as usize);
+            } else if (ID_MENU_GROUP_NONE..=ID_MENU_GROUP_SPACE).contains(&id) {
+                set_grouping(&mut *state, id);
+            } else if id == ID_INPUT && notification == EN_CHANGE {
+                // An edit control reports progress through `EN_CHANGE`, not
+                // through notification code 0. Live evaluation on every change
+                // means the answer is already on screen when Enter is pressed.
+                evaluate(&mut *state);
             }
             0
         }
@@ -338,6 +382,71 @@ unsafe extern "system" fn wndproc(
 /// The state attached to `window`, or null if it has already been released.
 unsafe fn state_of(window: HWND) -> *mut Window {
     GetWindowLongPtrW(window, GWLP_USERDATA) as *mut Window
+}
+
+/// Builds the menu bar and attaches it to the window.
+///
+/// Built in code rather than loaded from a resource so the program stays a
+/// single binary with no `.rc` step in the build.
+unsafe fn create_menu(window: HWND) -> Result<HMENU, ()> {
+    let bar = CreateMenu();
+    if bar.is_null() {
+        return Err(());
+    }
+    let grouping = CreatePopupMenu();
+    if grouping.is_null() {
+        DestroyMenu(bar);
+        return Err(());
+    }
+
+    for (id, label) in [
+        (ID_MENU_GROUP_NONE, "None"),
+        (ID_MENU_GROUP_UNDERSCORE, "Underscore  1_000_000"),
+        (ID_MENU_GROUP_COMMA, "Comma  1,000,000"),
+        (ID_MENU_GROUP_SPACE, "Space  1 000 000"),
+    ] {
+        let text = wide(label);
+        AppendMenuW(grouping, MF_STRING, id as usize, text.as_ptr());
+    }
+
+    let caption = wide("&Digits");
+    AppendMenuW(
+        bar,
+        MF_POPUP | MF_STRING,
+        grouping as usize,
+        caption.as_ptr(),
+    );
+
+    if SetMenu(window, bar) == 0 {
+        DestroyMenu(bar);
+        return Err(());
+    }
+    Ok(bar)
+}
+
+/// Applies a grouping choice from the menu and re-renders the current answer.
+unsafe fn set_grouping(state: &mut Window, id: i32) {
+    state.style.grouping = match id {
+        ID_MENU_GROUP_UNDERSCORE => Grouping::Underscore,
+        ID_MENU_GROUP_COMMA => Grouping::Comma,
+        ID_MENU_GROUP_SPACE => Grouping::Space,
+        _ => Grouping::None,
+    };
+    for candidate in [
+        ID_MENU_GROUP_NONE,
+        ID_MENU_GROUP_UNDERSCORE,
+        ID_MENU_GROUP_COMMA,
+        ID_MENU_GROUP_SPACE,
+    ] {
+        let flag = if candidate == id {
+            MF_CHECKED
+        } else {
+            MF_UNCHECKED
+        };
+        CheckMenuItem(state.menu, candidate as u32, MF_BYCOMMAND | flag);
+    }
+    // The answer is already computed; only the way it is written changes.
+    evaluate(state);
 }
 
 /// Creates the two edit controls and applies the font to both.
@@ -411,7 +520,103 @@ unsafe fn create_controls(window: HWND, state: &mut Window) -> Result<(), ()> {
     // null handle is the integer 0, not a cast null pointer.
     SendMessageW(input, WM_SETFONT, state.font as usize as WPARAM, 1);
     SendMessageW(output, WM_SETFONT, state.font as usize as WPARAM, 1);
+    create_keypad(window, state)
+}
+
+/// Creates one button per keypad key and applies the font to all of them.
+unsafe fn create_keypad(window: HWND, state: &mut Window) -> Result<(), ()> {
+    let instance = GetModuleHandleW(ptr::null());
+    let button = wide("BUTTON");
+
+    for (index, key) in keypad::keys().enumerate() {
+        let label = wide(key.label);
+        let control = CreateWindowExW(
+            0,
+            button.as_ptr(),
+            label.as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32,
+            0,
+            0,
+            0,
+            0,
+            window,
+            (keypad::ID_KEY_FIRST + index as i32) as _,
+            instance,
+            ptr::null_mut(),
+        );
+        if control.is_null() {
+            return Err(());
+        }
+        SendMessageW(control, WM_SETFONT, state.font as usize as WPARAM, 1);
+        state.buttons.push(control);
+    }
     Ok(())
+}
+
+/// Handles a keypad press: edits the expression, or runs it for `=`.
+unsafe fn press(state: &mut Window, index: usize) {
+    let key = match keypad::key_at(index) {
+        Some(key) => key,
+        None => return,
+    };
+    match key.insert {
+        keypad::ACTION_CLEAR => {
+            SetWindowTextW(state.input, wide("").as_ptr());
+            return;
+        }
+        keypad::ACTION_BACKSPACE => {
+            let (text, caret, end) = input_state(state.input);
+            let result = edit::backspace(&text, caret, end);
+            apply_input(state, &result.text, result.caret);
+            return;
+        }
+        keypad::ACTION_EVALUATE => {
+            evaluate(state);
+            return;
+        }
+        _ => {}
+    }
+
+    let (text, caret, end) = input_state(state.input);
+    // Typing over a selection replaces it, the way an edit control would.
+    let (text, caret) = if end != caret {
+        let cleared = edit::backspace(&text, caret, end);
+        (cleared.text, cleared.caret)
+    } else {
+        (text, caret)
+    };
+    let result = edit::insert(&text, caret, key.insert, key.caret);
+    apply_input(state, &result.text, result.caret);
+}
+
+/// Replaces the input text and puts the caret where the edit left it.
+unsafe fn apply_input(state: &mut Window, text: &str, caret: edit::Caret) {
+    SetWindowTextW(state.input, wide(text).as_ptr());
+    // `SetWindowTextW` resets the selection to the start, so the caret has to
+    // be restored afterwards or every key press would jump to the front.
+    SendMessageW(state.input, EM_SETSEL, caret, caret as isize);
+    focus_input(state);
+}
+
+/// The input's text and both ends of its selection.
+unsafe fn input_state(input: HWND) -> (String, edit::Caret, edit::Caret) {
+    let text = window_text(input);
+    let mut start = 0u32;
+    let mut end = 0u32;
+    SendMessageW(
+        input,
+        EM_GETSEL,
+        &mut start as *mut u32 as WPARAM,
+        &mut end as *mut u32 as LPARAM,
+    );
+    let length = text.chars().count() as u32;
+    // A control with no selection reports both ends as `0xffffffff` style
+    // sentinels; clamping keeps the caret arithmetic in range either way.
+    (
+        text,
+        (start.min(length)) as usize,
+        (end.min(length)) as usize,
+    )
 }
 
 /// Window procedure for the input box.
@@ -444,9 +649,9 @@ unsafe extern "system" fn input_proc(
     }
 }
 
-/// Splits the client area into the input strip, the result area, and the
-/// margins between them. Recomputed on every `WM_SIZE` because the window is
-/// resizable and no control is anchored automatically.
+/// Splits the client area into the input strip, the result area, the keypad,
+/// and the margins between them. Recomputed on every `WM_SIZE` because the
+/// window is resizable and no control is anchored automatically.
 unsafe fn layout(state: &Window) {
     let mut client: RECT = std::mem::zeroed();
     if GetClientRect(window_of(state), &mut client) == 0 {
@@ -455,22 +660,33 @@ unsafe fn layout(state: &Window) {
     let client_width = client.right - client.left;
     let client_height = client.bottom - client.top;
 
-    // A fixed number of text lines for the input keeps the result area's share
-    // of the window predictable while the window is being resized.
+    // The keypad takes a fixed share of the width so the result area keeps as
+    // much room as possible for long digit strings, and a fixed share of the
+    // height so its rows stay square-ish rather than stretching.
+    let pad_width = (client_width / KEYPAD_WIDTH_DIVISOR).clamp(MIN_KEYPAD_WIDTH, MAX_KEYPAD_WIDTH);
+    let text_width = (client_width - 2 * MARGIN - GAP - pad_width).max(1);
+    let pad_left = MARGIN + text_width + GAP;
+
     let content_height = (client_height - 2 * MARGIN - GAP).max(0);
     let input_height = (content_height / 6).clamp(MIN_INPUT_HEIGHT, 3 * MIN_INPUT_HEIGHT);
     let output_height = (content_height - input_height).max(MIN_OUTPUT_HEIGHT);
-    let width = (client_width - 2 * MARGIN).max(1);
 
-    MoveWindow(state.input, MARGIN, MARGIN, width, input_height, 1);
+    MoveWindow(state.input, MARGIN, MARGIN, text_width, input_height, 1);
     MoveWindow(
         state.output,
         MARGIN,
         MARGIN + input_height + GAP,
-        width,
+        text_width,
         output_height,
         1,
     );
+
+    let pad_top = MARGIN + input_height + GAP;
+    let pad_height = (client_height - MARGIN - pad_top).max(1);
+    for (index, button) in state.buttons.iter().enumerate() {
+        let (x, y, width, height) = keypad::cell(index, pad_width, pad_height);
+        MoveWindow(*button, pad_left + x, pad_top + y, width, height, 1);
+    }
 }
 
 /// The window a state belongs to, read back from its input control.
@@ -488,8 +704,16 @@ unsafe fn evaluate(state: &mut Window) {
     if expression.trim().is_empty() {
         return;
     }
+    // Evaluated once: for a large expression the arithmetic is cheap but
+    // rendering is not, so repeating the call to recover `ans` would double the
+    // cost of every keystroke.
     let outcome = match state.engine.eval(&expression) {
-        Ok(value) => format::render(&value, Style::default()),
+        Ok(value) => {
+            // The result doubles as `ans` for the next expression, so the
+            // keypad's `ans` key refers to what is on screen.
+            state.engine.set(edit::ANSWER_VARIABLE, value.clone());
+            format::render(&value, state.style)
+        }
         Err(error) => format::Rendered {
             text: error.to_string(),
             note: None,

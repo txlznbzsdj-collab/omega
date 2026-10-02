@@ -61,22 +61,81 @@ Neither has a runtime dependency beyond the system itself.
 
 ## The window
 
-`omega-gui` opens a window with an input box and a scrollable result area.
-Type an expression and the answer appears as you type; Enter re-evaluates
-explicitly.
+`omega-gui` opens a window with an input box, a scrollable result area, a
+button keypad, and a `Digits` menu.
+
+```
+┌──────────────────────────────────────────┬────────────────────┐
+│ 9999^99999                               │  7  8  9  (  ) ^ ! %│
+├──────────────────────────────────────────┤  4  5  6  +  - * / .│
+│ 4538177213617479057343468180114259831141 │  1  2  3 sqrt ln … │
+│ 9343657529776253754496349838890825954407 │  0 00  x sin cos … │
+│ 9749604191778214250687172065467597286648 │  C Del = abs gcd … │
+└──────────────────────────────────────────┴────────────────────┘
+```
+
+**Results appear as you type.** Enter re-evaluates explicitly. Errors appear in
+the result area, in place of the answer, rather than in a dialog.
+
+### The keypad
+
+Forty buttons across five rows:
+
+| Row | Keys |
+| --- | --- |
+| 1 | `7 8 9 ( ) ^ ! %` |
+| 2 | `4 5 6 + - * / .` |
+| 3 | `1 2 3 sqrt ln log exp pi` |
+| 4 | `0 00 x sin cos tan atan e` |
+| 5 | `C Del = abs gcd nthroot ans E` |
+
+* Function keys insert a **complete call** — `sqrt()` — and leave the caret
+between the brackets, so the digits typed next become the argument. You never
+have to close a bracket a button opened.
+* `C` clears, `Del` backspaces, `=` evaluates. Deleting over a selection works
+  the way an edit control does.
+* `ans` refers to the previous answer, so `ans * ans` chains without retyping.
+* `pi` inserts the name, not the `π` glyph, so the expression stays typeable.
+
+### The menu
+
+`Digits` controls how a result is written. It never changes the value:
+
+| Item | `2^64` displays as |
+| --- | --- |
+| None *(default)* | `18446744073709551616` |
+| Underscore | `18_446_744_073_709_551_616` |
+| Comma | `18,446,744,073,709,551,616` |
+| Space | `18 446 744 073 709 551 616` |
+
+Switching re-renders the answer already on screen; nothing is recomputed.
+
+### Why it is small
 
 It is built directly on the Win32 API rather than on a GUI toolkit: it links
-`user32` and `gdi32` and nothing else, and the whole program is **358 KB**,
-against roughly 8-15 MB for a typical Rust GUI stack. It needs about 3 MB of
-private memory.
+`user32` and `gdi32` and nothing else. The whole program is **367 KB**, against
+roughly 8-15 MB for a typical Rust GUI stack, and needs about 3 MB of private
+memory. The keypad and menu together added 9 KB.
 
-Correctness is checked without an interactive desktop by `bench/gui-path-check.rs`,
-which reproduces the exact logic the window runs between its Win32 calls — the
-same engine call, the same render, the same error branch:
+### How it is checked
+
+The window cannot be driven headlessly — keystrokes cannot be injected into
+another process's controls — so the logic between its Win32 calls is covered by
+tests instead. Those tests run the same engine call, the same style, the same
+`ans` binding, and the same error branch, and they type keypad sequences by
+label:
 
 ```
-cargo run --release --bin gui-path-check
+cargo test --test gui_logic
 ```
+
+To confirm the controls exist on a running window, launch `omega-gui` and then:
+
+```
+cargo run --release --bin gui-inspect
+```
+
+which enumerates the window's menu items and every button label.
 
 ## Usage
 
