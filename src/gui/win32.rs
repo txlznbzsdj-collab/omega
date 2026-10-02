@@ -66,11 +66,14 @@ const GAP: i32 = 6;
 const MIN_INPUT_HEIGHT: i32 = 22;
 const MIN_OUTPUT_HEIGHT: i32 = 80;
 
-/// The keypad's share of the window width, bounded so it neither vanishes on a
-/// narrow window nor crowds out the result on a wide one.
-const KEYPAD_WIDTH_DIVISOR: i32 = 3;
-const MIN_KEYPAD_WIDTH: i32 = 180;
-const MAX_KEYPAD_WIDTH: i32 = 380;
+/// The keypad is sized from its content: each column needs room for the widest
+/// label, and neighbours are separated by `KEY_GAP` so the labels do not touch.
+const MIN_KEY_WIDTH: i32 = 52;
+const KEY_GAP: i32 = 4;
+const MIN_KEYPAD_WIDTH: i32 = 200;
+/// Rows stop growing past this, so a tall window gives the extra space to the
+/// result area instead of producing oversized buttons.
+const MAX_KEY_HEIGHT: i32 = 34;
 
 /// A font that is installed on essentially every Windows system, used when
 /// Consolas is not available. Both are fixed pitch, which results need: a
@@ -660,17 +663,18 @@ unsafe fn layout(state: &Window) {
     let client_width = client.right - client.left;
     let client_height = client.bottom - client.top;
 
-    // The keypad takes a fixed share of the width so the result area keeps as
-    // much room as possible for long digit strings, and a fixed share of the
-    // height so its rows stay square-ish rather than stretching.
-    let pad_width = (client_width / KEYPAD_WIDTH_DIVISOR).clamp(MIN_KEYPAD_WIDTH, MAX_KEYPAD_WIDTH);
+    // The keypad is sized from what it holds rather than as a fraction of the
+    // window: eight columns each need enough room for the longest label, or
+    // `nthroot` is clipped to `hro` and the last column falls off the edge.
+    let pad_width = (keypad::columns() as i32 * MIN_KEY_WIDTH
+        + (keypad::columns() as i32 - 1) * KEY_GAP)
+        .min((client_width / 2).max(MIN_KEYPAD_WIDTH));
     let text_width = (client_width - 2 * MARGIN - GAP - pad_width).max(1);
     let pad_left = MARGIN + text_width + GAP;
 
     let content_height = (client_height - 2 * MARGIN - GAP).max(0);
     let input_height = (content_height / 6).clamp(MIN_INPUT_HEIGHT, 3 * MIN_INPUT_HEIGHT);
     let output_height = (content_height - input_height).max(MIN_OUTPUT_HEIGHT);
-
     MoveWindow(state.input, MARGIN, MARGIN, text_width, input_height, 1);
     MoveWindow(
         state.output,
@@ -681,10 +685,14 @@ unsafe fn layout(state: &Window) {
         1,
     );
 
+    // Rows are capped rather than stretched to the window: five rows of
+    // full-height buttons leave a large dead gap and look nothing like a
+    // keypad, so any spare height goes to the result area instead.
     let pad_top = MARGIN + input_height + GAP;
-    let pad_height = (client_height - MARGIN - pad_top).max(1);
+    let available = (client_height - MARGIN - pad_top).max(1);
+    let pad_height = available.min(keypad::rows() as i32 * MAX_KEY_HEIGHT);
     for (index, button) in state.buttons.iter().enumerate() {
-        let (x, y, width, height) = keypad::cell(index, pad_width, pad_height);
+        let (x, y, width, height) = keypad::cell(index, pad_width, pad_height, KEY_GAP);
         MoveWindow(*button, pad_left + x, pad_top + y, width, height, 1);
     }
 }

@@ -50,3 +50,8 @@ path = "bench/edit-limit-probe.rs"
 [[bin]]
 name = "gui-inspect"
 path = "bench/gui-inspect.rs"
+# Reports a running window's keypad geometry, so the layout can be checked
+# against what it should be without seeing the screen.
+[[bin]]
+name = "gui-geometry"
+path = "bench/gui-geometry.rs"

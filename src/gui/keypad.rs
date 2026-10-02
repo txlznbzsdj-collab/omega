@@ -96,7 +96,9 @@ pub const ROWS: &[&[Key]] = &[
         Key::new("=", "\u{3}"),
         Key::call("abs", "abs()"),
         Key::call("gcd", "gcd()"),
-        Key::call("nthroot", "nthroot()"),
+        // `nthroot` is too long for a key this size; `root(x, n)` is the same
+        // function and fits.
+        Key::call("root", "nthroot()"),
         Key::new("ans", "ans"),
         Key::new("E", "e"),
     ],
@@ -138,13 +140,16 @@ pub fn columns() -> usize {
     ROWS.iter().map(|row| row.len()).max().unwrap_or(0)
 }
 
-/// Cell rectangle for `index` within a `width` x `height` grid area, in pixels.
+/// Cell rectangle for `index` within a `width` x `height` keypad area, in
+/// pixels, leaving `gap` pixels between neighbouring buttons.
 ///
 /// Grid coordinates rather than a fixed pixel size, so the pad scales with the
-/// window. The final row stretches to the bottom edge so no gap is left.
-pub fn cell(index: usize, width: i32, height: i32) -> (i32, i32, i32, i32) {
+/// window. The buttons are inset by the gap rather than the area being divided
+/// with a margin, so the outermost buttons still line up with the edges of the
+/// panel above them.
+pub fn cell(index: usize, width: i32, height: i32, gap: i32) -> (i32, i32, i32, i32) {
     let columns = columns().max(1) as i32;
-    let rows = ROWS.len().max(1) as i32;
+    let rows = rows() as i32;
     let column = (index as i32) % columns;
     let row = (index as i32) / columns;
 
@@ -152,5 +157,28 @@ pub fn cell(index: usize, width: i32, height: i32) -> (i32, i32, i32, i32) {
     let right = (column + 1) * width / columns;
     let top = row * height / rows;
     let bottom = (row + 1) * height / rows;
-    (left, top, right - left, bottom - top)
+
+    // The gap is split across the shared edge, so two neighbours end up exactly
+    // `gap` apart instead of overlapping or doubling the spacing.
+    let half = gap / 2;
+    let mut x = left + half;
+    let mut y = top + half;
+    let mut w = (right - left) - gap;
+    let mut h = (bottom - top) - gap;
+    // A very narrow window could make a cell smaller than the gap; keep every
+    // button at least one pixel rather than letting it vanish or go negative.
+    if w < 1 {
+        x = left;
+        w = (right - left).max(1);
+    }
+    if h < 1 {
+        y = top;
+        h = (bottom - top).max(1);
+    }
+    (x, y, w, h)
+}
+
+/// Number of rows in the grid.
+pub fn rows() -> usize {
+    ROWS.len().max(1)
 }

@@ -87,7 +87,7 @@ Forty buttons across five rows:
 | 2 | `4 5 6 + - * / .` |
 | 3 | `1 2 3 sqrt ln log exp pi` |
 | 4 | `0 00 x sin cos tan atan e` |
-| 5 | `C Del = abs gcd nthroot ans E` |
+| 5 | `C Del = abs gcd root ans E` |
 
 * Function keys insert a **complete call** — `sqrt()` — and leave the caret
 between the brackets, so the digits typed next become the argument. You never
@@ -96,6 +96,14 @@ have to close a bracket a button opened.
   the way an edit control does.
 * `ans` refers to the previous answer, so `ans * ans` chains without retyping.
 * `pi` inserts the name, not the `π` glyph, so the expression stays typeable.
+* `root` inserts `nthroot()`: the full name is wider than a button, and a
+  clipped label is worse than a shorter one.
+
+The pad is sized from its content — eight columns, each wide enough for the
+widest label — rather than as a fraction of the window. Sizing it by fraction
+clipped `nthroot` to `hro` and pushed the last column off the edge. Row height
+is capped too, so a tall window gives its extra space to the result area rather
+than to oversized buttons.
 
 ### The menu
 

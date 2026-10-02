@@ -203,42 +203,63 @@ fn key_indices_map_onto_the_grid() {
 }
 
 #[test]
-fn grid_cells_tile_the_area_without_gaps() {
-    let (width, height) = (800, 300);
+fn grid_cells_tile_the_area_without_overlapping() {
+    let (width, height, gap) = (800, 300, 4);
     let count = keypad::key_count();
     let columns = keypad::columns() as i32;
-    let rows = (count as i32 + columns - 1) / columns;
 
     // Every cell must sit inside the area and be non-empty.
     for index in 0..count {
-        let (x, y, w, h) = keypad::cell(index, width, height);
+        let (x, y, w, h) = keypad::cell(index, width, height, gap);
         assert!(x >= 0 && y >= 0, "cell {index} starts outside the area");
         assert!(x + w <= width, "cell {index} overflows the width");
         assert!(y + h <= height, "cell {index} overflows the height");
         assert!(w > 0 && h > 0, "cell {index} has no size");
     }
 
-    // The last row must reach the bottom edge, or the pad leaves a strip of
-    // dead space above the status text.
-    let last = count - 1;
-    let (_, y, _, h) = keypad::cell(last, width, height);
-    assert!(y + h <= height);
-    assert_eq!(
-        y + h,
-        rows * (height / rows),
-        "the last row does not reach the bottom"
-    );
+    // Neighbours in a row must be separated by the gap rather than touching or
+    // overlapping, which is what made `sqrt ln log exp` run together on screen.
+    let rows = (count as i32 + columns - 1) / columns;
+    for row in 0..rows {
+        let mut previous_right: Option<i32> = None;
+        for column in 0..columns {
+            let index = (row * columns + column) as usize;
+            if index >= count {
+                break;
+            }
+            let (x, _, w, _) = keypad::cell(index, width, height, gap);
+            if let Some(right) = previous_right {
+                let spacing = x - right;
+                assert!(
+                    spacing >= gap - 1,
+                    "row {row}: buttons are {spacing}px apart, expected about {gap}"
+                );
+            }
+            previous_right = Some(x + w);
+        }
+    }
 
-    // Left edges must be strictly increasing within a row, so no two keys
-    // overlap.
-    let mut previous_right = 0;
-    for index in 0..columns {
-        let (x, _, w, _) = keypad::cell(index as usize, width, height);
+    // A very narrow window must still give every button a positive size rather
+    // than letting the gap consume it.
+    for index in 0..count {
+        let (_, _, w, h) = keypad::cell(index, 40, 30, gap);
+        assert!(w >= 1 && h >= 1, "cell {index} collapsed on a tiny window");
+    }
+}
+
+#[test]
+fn a_long_label_fits_a_button_at_the_minimum_width() {
+    // The pad is sized as `columns * MIN_KEY_WIDTH`, so a label wider than that
+    // is silently clipped by Windows — which is how `nthroot` became `hro`.
+    const MIN_KEY_WIDTH: usize = 52;
+    const APPROX_CHAR_WIDTH: usize = 7;
+    for key in keypad::keys() {
+        let needed = key.label.chars().count() * APPROX_CHAR_WIDTH;
         assert!(
-            x >= previous_right,
-            "cell {index} overlaps the one before it"
+            needed <= MIN_KEY_WIDTH,
+            "label `{}` needs about {needed}px, more than the {MIN_KEY_WIDTH}px a button holds",
+            key.label
         );
-        previous_right = x + w;
     }
 }
 
