@@ -10,6 +10,7 @@
 
 pub mod edit;
 pub mod keypad;
+pub mod worker;
 
 #[cfg(windows)]
 pub mod win32;

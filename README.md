@@ -102,8 +102,9 @@ have to close a bracket a button opened.
 The pad is sized from its content — eight columns, each wide enough for the
 widest label — rather than as a fraction of the window. Sizing it by fraction
 clipped `nthroot` to `hro` and pushed the last column off the edge. Row height
-is capped too, so a tall window gives its extra space to the result area rather
-than to oversized buttons.
+is capped too, so buttons stay a sensible size on a tall window; the space that
+leaves below the pad belongs to the result area, which runs to the bottom of the
+window, so nothing is left blank beside a short keypad.
 
 ### The menu
 
@@ -118,32 +119,58 @@ than to oversized buttons.
 
 Switching re-renders the answer already on screen; nothing is recomputed.
 
+### Staying responsive
+
+Evaluating a large result takes seconds — rendering a 2.4-million-digit answer
+takes about five — and the engine permits far larger ones. Doing that on the
+window's own thread would stop it painting, and Windows would mark it "not
+responding". Evaluation therefore runs on a worker thread and the answer is
+posted back as a message, so the window keeps drawing and the close button
+keeps working throughout.
+
+Only the newest request is ever displayed. Typing re-evaluates on every
+keystroke, so an answer that a later keystroke has already overtaken is dropped
+rather than flashed on screen, and an in-flight evaluation is abandoned rather
+than allowed to run to completion on input that no longer matters.
+
+Measured on a running window with `2^8000000` (2.4 million digits):
+
+```
+$ cargo run --release --bin gui-responsiveness -- "2^8000000"
+probes sent: 286
+worst round trip: 0.7 ms
+RESPONSIVE: the message loop kept running throughout
+```
+
+A window evaluating inline cannot answer at all while it works, so a stall
+would show up here as a multi-second round trip.
+
 ### Why it is small
 
 It is built directly on the Win32 API rather than on a GUI toolkit: it links
-`user32` and `gdi32` and nothing else. The whole program is **367 KB**, against
+`user32` and `gdi32` and nothing else. The whole program is **433 KB**, against
 roughly 8-15 MB for a typical Rust GUI stack, and needs about 3 MB of private
-memory. The keypad and menu together added 9 KB.
+memory. The keypad and menu cost 9 KB; the worker thread that keeps the window
+responsive costs about 66 KB.
 
 ### How it is checked
 
-The window cannot be driven headlessly — keystrokes cannot be injected into
-another process's controls — so the logic between its Win32 calls is covered by
-tests instead. Those tests run the same engine call, the same style, the same
-`ans` binding, and the same error branch, and they type keypad sequences by
-label:
+The window's own behaviour is exercised by driving a real running window, since
+a test process cannot see or click one:
 
-```
-cargo test --test gui_logic
-```
+| Command | What it proves |
+| --- | --- |
+| `cargo test --test gui_logic` | The editing, evaluation and layout logic, without a window |
+| `cargo run --release --bin gui-drive` | Clicks real keypad buttons and checks the answer appears |
+| `cargo run --release --bin gui-responsiveness` | The window keeps pumping messages under a heavy load |
+| `cargo run --release --bin gui-geometry` | Button rectangles: no overlap, no clipping, no overflow |
+| `cargo run --release --bin gui-inspect` | The menu items and every button label |
 
-To confirm the controls exist on a running window, launch `omega-gui` and then:
-
-```
-cargo run --release --bin gui-inspect
-```
-
-which enumerates the window's menu items and every button label.
+The driving tools click buttons through the target's own message queue, which
+is what a real mouse does. Reading a control's text uses `WM_GETTEXT` rather
+than `GetWindowTextW`, because the latter deliberately refuses to read a control
+belonging to another process and returns an empty string instead — a check built
+on it would report a working window as broken.
 
 ## Usage
 

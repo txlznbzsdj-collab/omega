@@ -55,3 +55,14 @@ path = "bench/gui-inspect.rs"
 [[bin]]
 name = "gui-geometry"
 path = "bench/gui-geometry.rs"
+# Proves a running window keeps pumping messages while a heavy expression is
+# evaluated, which is the difference between a responsive window and a frozen one.
+[[bin]]
+name = "gui-responsiveness"
+path = "bench/gui-responsiveness.rs"
+
+# Drives a running window by clicking its real keypad buttons.
+[[bin]]
+name = "gui-drive"
+path = "bench/gui-drive.rs"
+

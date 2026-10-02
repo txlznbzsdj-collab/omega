@@ -13,9 +13,8 @@
 //! worker thread, would add synchronization for a case the engine already keeps
 //! fast.
 
-use crate::format::{self, Grouping, Style};
-use crate::gui::{edit, keypad};
-use crate::Engine;
+use crate::format::{Grouping, Style};
+use crate::gui::{edit, keypad, worker};
 use std::ptr;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -31,13 +30,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyMenu, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, GetParent,
     GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, LoadCursorW, MessageBoxW, MoveWindow,
-    PostQuitMessage, RegisterClassW, SendMessageW, SetMenu, SetWindowLongPtrW, SetWindowTextW,
-    ShowWindow, TranslateMessage, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-    CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY,
-    GWLP_USERDATA, GWLP_WNDPROC, HMENU, IDC_ARROW, MB_ICONERROR, MB_OK, MF_BYCOMMAND, MF_CHECKED,
-    MF_POPUP, MF_STRING, MF_UNCHECKED, MSG, SW_SHOW, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
-    WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_NCCREATE, WM_SETFONT, WM_SIZE, WNDCLASSW, WNDPROC,
-    WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    PostMessageW, PostQuitMessage, RegisterClassW, SendMessageW, SetMenu, SetWindowLongPtrW,
+    SetWindowTextW, ShowWindow, TranslateMessage, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE,
+    ES_READONLY, GWLP_USERDATA, GWLP_WNDPROC, HMENU, IDC_ARROW, MB_ICONERROR, MB_OK, MF_BYCOMMAND,
+    MF_CHECKED, MF_POPUP, MF_STRING, MF_UNCHECKED, MSG, SW_SHOW, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_NCCREATE, WM_SETFONT, WM_SIZE,
+    WNDCLASSW, WNDPROC, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    WS_VSCROLL,
 };
 
 /// Identifier of the input edit control, and therefore of the notification code
@@ -53,6 +53,11 @@ const ID_OUTPUT: i32 = 2;
 /// the range check stays valid.
 const MAX_KEYS: usize = 64;
 
+/// Posted by the worker when an answer is ready. `WM_APP` is the first value
+/// Windows leaves to the application, so it cannot collide with a system
+/// message.
+const WM_APP_ANSWER: u32 = WM_APP + 1;
+
 /// Command ids for the menu. Grouped away from the keypad range so a misread
 /// command cannot be mistaken for a key press.
 const ID_MENU_GROUP_NONE: i32 = 900;
@@ -64,7 +69,6 @@ const ID_MENU_GROUP_SPACE: i32 = 903;
 const MARGIN: i32 = 8;
 const GAP: i32 = 6;
 const MIN_INPUT_HEIGHT: i32 = 22;
-const MIN_OUTPUT_HEIGHT: i32 = 80;
 
 /// The keypad is sized from its content: each column needs room for the widest
 /// label, and neighbours are separated by `KEY_GAP` so the labels do not touch.
@@ -197,7 +201,11 @@ struct Window {
     menu: HMENU,
     /// How results are arranged: significant digits and digit grouping.
     style: Style,
-    engine: Engine,
+    /// Runs evaluations off this thread, so a slow one cannot freeze the
+    /// window.
+    worker: worker::Worker,
+    /// The generation of the answer the window is waiting to display.
+    expected: u64,
     /// The rendered result, kept so `WM_GETFONT`/rescaling would not have to
     /// recompute anything, and so the text handed to `SetWindowTextW` outlives
     /// the call.
@@ -283,6 +291,9 @@ unsafe extern "system" fn wndproc(
             if create.is_null() {
                 return 0;
             }
+            // The handle crosses threads as an integer: `HWND` is a raw pointer
+            // and so is not `Send`, but posting to it is safe from any thread.
+            let target = window as isize;
             let state = Box::new(Window {
                 input: ptr::null_mut(),
                 output: ptr::null_mut(),
@@ -292,7 +303,12 @@ unsafe extern "system" fn wndproc(
                 buttons: Vec::new(),
                 menu: ptr::null_mut(),
                 style: Style::default(),
-                engine: Engine::new(),
+                // The worker wakes the window by posting, which is safe from
+                // another thread; touching the controls from there would not be.
+                worker: worker::Worker::start(move || {
+                    PostMessageW(target as HWND, WM_APP_ANSWER, 0, 0);
+                }),
+                expected: 0,
                 last_output: String::new(),
             });
             SetWindowLongPtrW(window, GWLP_USERDATA, Box::into_raw(state) as isize);
@@ -321,6 +337,16 @@ unsafe extern "system" fn wndproc(
         // Every control fills its client area opaquely, so Windows' flicker-free
         // resizing would erase to the background first and flash white.
         WM_ERASEBKGND => 1,
+        // Posted by the worker once an expression has been evaluated. The
+        // window is idle by now, so writing the result here cannot block
+        // anything the user is waiting on.
+        WM_APP_ANSWER => {
+            let state = state_of(window);
+            if !state.is_null() {
+                show_answer(&mut *state);
+            }
+            0
+        }
         WM_SIZE => {
             let state = state_of(window);
             if !state.is_null() {
@@ -345,7 +371,7 @@ unsafe extern "system" fn wndproc(
                 // An edit control reports progress through `EN_CHANGE`, not
                 // through notification code 0. Live evaluation on every change
                 // means the answer is already on screen when Enter is pressed.
-                evaluate(&mut *state);
+                request_evaluation(&mut *state);
             }
             0
         }
@@ -448,8 +474,10 @@ unsafe fn set_grouping(state: &mut Window, id: i32) {
         };
         CheckMenuItem(state.menu, candidate as u32, MF_BYCOMMAND | flag);
     }
-    // The answer is already computed; only the way it is written changes.
-    evaluate(state);
+    // Re-rendered rather than recomputed: the worker re-evaluates the same
+    // expression, but the engine's cost is in the arithmetic, and the style
+    // only affects how the finished value is written out.
+    request_evaluation(state);
 }
 
 /// Creates the two edit controls and applies the font to both.
@@ -565,16 +593,19 @@ unsafe fn press(state: &mut Window, index: usize) {
     match key.insert {
         keypad::ACTION_CLEAR => {
             SetWindowTextW(state.input, wide("").as_ptr());
+            apply_input(state, "", 0);
+            request_evaluation(state);
             return;
         }
         keypad::ACTION_BACKSPACE => {
             let (text, caret, end) = input_state(state.input);
             let result = edit::backspace(&text, caret, end);
             apply_input(state, &result.text, result.caret);
+            request_evaluation(state);
             return;
         }
         keypad::ACTION_EVALUATE => {
-            evaluate(state);
+            request_evaluation(state);
             return;
         }
         _ => {}
@@ -590,6 +621,11 @@ unsafe fn press(state: &mut Window, index: usize) {
     };
     let result = edit::insert(&text, caret, key.insert, key.caret);
     apply_input(state, &result.text, result.caret);
+    // Asked for directly rather than left to the `EN_CHANGE` the text change
+    // produces: that notification is delivered by `SendMessage`, so it arrives
+    // re-entrantly in the middle of this function and can be missed when the
+    // window is already busy.
+    request_evaluation(state);
 }
 
 /// Replaces the input text and puts the caret where the edit left it.
@@ -635,7 +671,7 @@ unsafe extern "system" fn input_proc(
 ) -> LRESULT {
     let state = state_of(GetParent(window));
     if message == WM_KEYDOWN && wparam as u16 == VK_RETURN && !state.is_null() {
-        evaluate(&mut *state);
+        request_evaluation(&mut *state);
         return 0;
     }
     // `state.input_proc` is whatever the control had before, read back out of
@@ -674,23 +710,18 @@ unsafe fn layout(state: &Window) {
 
     let content_height = (client_height - 2 * MARGIN - GAP).max(0);
     let input_height = (content_height / 6).clamp(MIN_INPUT_HEIGHT, 3 * MIN_INPUT_HEIGHT);
-    let output_height = (content_height - input_height).max(MIN_OUTPUT_HEIGHT);
     MoveWindow(state.input, MARGIN, MARGIN, text_width, input_height, 1);
-    MoveWindow(
-        state.output,
-        MARGIN,
-        MARGIN + input_height + GAP,
-        text_width,
-        output_height,
-        1,
-    );
 
-    // Rows are capped rather than stretched to the window: five rows of
-    // full-height buttons leave a large dead gap and look nothing like a
-    // keypad, so any spare height goes to the result area instead.
+    // The result area and the keypad start on the same line. The result area
+    // runs to the bottom of the window, so the space beneath the compact keypad
+    // is used rather than left blank, while the buttons stop at a height that
+    // still looks like a keypad.
     let pad_top = MARGIN + input_height + GAP;
-    let available = (client_height - MARGIN - pad_top).max(1);
-    let pad_height = available.min(keypad::rows() as i32 * MAX_KEY_HEIGHT);
+    let band_height = (client_height - MARGIN - pad_top).max(1);
+    let pad_height = band_height.min(keypad::rows() as i32 * MAX_KEY_HEIGHT);
+
+    MoveWindow(state.output, MARGIN, pad_top, text_width, band_height, 1);
+
     for (index, button) in state.buttons.iter().enumerate() {
         let (x, y, width, height) = keypad::cell(index, pad_width, pad_height, KEY_GAP);
         MoveWindow(*button, pad_left + x, pad_top + y, width, height, 1);
@@ -702,35 +733,36 @@ unsafe fn window_of(state: &Window) -> HWND {
     GetParent(state.input)
 }
 
-/// Evaluates the expression in the input control and shows the outcome.
+/// Hands the expression to the worker and remembers which answer to expect.
 ///
-/// Errors are part of the result here, not an exception: a syntax error is what
-/// the user is most often looking at, so it belongs in the same place the
-/// answer would have appeared.
-unsafe fn evaluate(state: &mut Window) {
+/// Nothing is computed here: rendering a large result takes seconds, and doing
+/// it on this thread would stop the window from painting or closing. The answer
+/// arrives later as `WM_APP_ANSWER`.
+unsafe fn request_evaluation(state: &mut Window) {
     let expression = window_text(state.input);
     if expression.trim().is_empty() {
+        // An emptied box should clear the result rather than leave the previous
+        // answer sitting under an expression that no longer produces it.
+        state.expected = 0;
+        state.last_output.clear();
+        SetWindowTextW(state.output, wide("").as_ptr());
         return;
     }
-    // Evaluated once: for a large expression the arithmetic is cheap but
-    // rendering is not, so repeating the call to recover `ans` would double the
-    // cost of every keystroke.
-    let outcome = match state.engine.eval(&expression) {
-        Ok(value) => {
-            // The result doubles as `ans` for the next expression, so the
-            // keypad's `ans` key refers to what is on screen.
-            state.engine.set(edit::ANSWER_VARIABLE, value.clone());
-            format::render(&value, state.style)
-        }
-        Err(error) => format::Rendered {
-            text: error.to_string(),
-            note: None,
-        },
+    state.expected = state.worker.submit(expression, state.style);
+}
+
+/// Shows the newest finished answer.
+///
+/// `take_latest` drains everything queued, so an answer that a later keystroke
+/// has already overtaken is dropped instead of being briefly displayed. No
+/// generation check is needed: the queue is ordered, so the last answer out is
+/// the newest one.
+unsafe fn show_answer(state: &mut Window) {
+    let answer = match state.worker.take_latest() {
+        Some(answer) => answer,
+        None => return,
     };
-    state.last_output = match outcome.note {
-        Some(note) => format!("{}\r\n{}", outcome.text, note),
-        None => outcome.text,
-    };
+    state.last_output = answer.text;
     let text = wide(&state.last_output);
     SetWindowTextW(state.output, text.as_ptr());
     // A fresh result should be read from its first line, not from wherever the
