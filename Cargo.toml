@@ -11,6 +11,19 @@ num-bigint = "0.4"
 num-integer = "0.1"
 num-traits = "0.2"
 
+# Only the native window needs to link anything, and on Windows the Win32
+# libraries are already part of the OS, so the front end adds no runtime
+# dependency.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [profile.release]
 opt-level = 3
 lto = "fat"
@@ -22,3 +35,18 @@ panic = "abort"
 [[bin]]
 name = "compare"
 path = "bench/compare.rs"
+
+# The graphical front end. Same engine, native window, no toolkit.
+[[bin]]
+name = "omega-gui"
+path = "src/bin/omega-gui.rs"
+# Proves the evaluation logic the GUI performs between its Win32 calls, so the
+# wiring can be checked without an interactive desktop.
+[[bin]]
+name = "gui-path-check"
+path = "bench/gui-path-check.rs"
+# Measures the real text capacity of a Win32 edit control, so result display is
+# sized against evidence rather than a guess.
+[[bin]]
+name = "edit-limit-probe"
+path = "bench/edit-limit-probe.rs"

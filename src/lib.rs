@@ -8,6 +8,7 @@
 pub mod cli;
 pub mod eval;
 pub mod format;
+pub mod gui;
 pub mod lexer;
 pub mod number;
 pub mod parser;

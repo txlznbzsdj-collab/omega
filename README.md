@@ -50,7 +50,33 @@ Requires a Rust toolchain (1.75 or newer).
 cargo build --release
 ```
 
-The binary is `target/release/omega`. No runtime dependencies.
+Two programs are produced:
+
+| Binary | What it is |
+| --- | --- |
+| `target/release/omega` | The command-line calculator |
+| `target/release/omega-gui` | The same engine in a native window (Windows) |
+
+Neither has a runtime dependency beyond the system itself.
+
+## The window
+
+`omega-gui` opens a window with an input box and a scrollable result area.
+Type an expression and the answer appears as you type; Enter re-evaluates
+explicitly.
+
+It is built directly on the Win32 API rather than on a GUI toolkit: it links
+`user32` and `gdi32` and nothing else, and the whole program is **358 KB**,
+against roughly 8-15 MB for a typical Rust GUI stack. It needs about 3 MB of
+private memory.
+
+Correctness is checked without an interactive desktop by `bench/gui-path-check.rs`,
+which reproduces the exact logic the window runs between its Win32 calls — the
+same engine call, the same render, the same error branch:
+
+```
+cargo run --release --bin gui-path-check
+```
 
 ## Usage
 
